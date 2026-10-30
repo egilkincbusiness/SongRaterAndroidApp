@@ -12,6 +12,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.annotation.OptIn
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -23,6 +25,7 @@ import java.util.concurrent.Executors
  * screen off. The activity only displays [UiState] and forwards button presses.
  * All fields are touched on the main thread only; folder and tag work runs on [io] and posts back.
  */
+@OptIn(UnstableApi::class)
 class PlayerService : MediaSessionService() {
 
     companion object {
