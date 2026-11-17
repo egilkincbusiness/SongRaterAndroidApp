@@ -24,7 +24,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
-import androidx.media3.session.MediaStyleNotificationHelper
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -150,10 +149,6 @@ class PlayerService : MediaSessionService() {
         if (intent?.action == ACTION_LOCAL) binder else super.onBind(intent)
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
-
-    // We post our own notification (see refreshNotification); stop Media3 from posting a second one.
-    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
-    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -476,7 +471,7 @@ class PlayerService : MediaSessionService() {
         val artist = info?.artist.orEmpty()
         val album = info?.album.orEmpty()
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_star)
+            .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(displayTitle(t, info))
             .setContentText(listOf(artist, album).filter { it.isNotBlank() }.joinToString(" – "))
             .setContentIntent(open)
@@ -490,9 +485,6 @@ class PlayerService : MediaSessionService() {
                 action(1, ACTION_TOGGLE)
             )
             .addAction(android.R.drawable.ic_media_next, "Next", action(2, ACTION_NEXT))
-        session?.let {
-            builder.setStyle(MediaStyleNotificationHelper.MediaStyle(it).setShowActionsInCompactView(0, 1))
-        }
         return builder.build()
     }
 
