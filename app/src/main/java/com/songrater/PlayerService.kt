@@ -1,6 +1,11 @@
 package com.songrater
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
@@ -15,8 +20,11 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.annotation.OptIn
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.MediaStyleNotificationHelper
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -30,6 +38,10 @@ class PlayerService : MediaSessionService() {
 
     companion object {
         const val ACTION_LOCAL = "com.songrater.LOCAL_BIND"
+        private const val ACTION_TOGGLE = "com.songrater.TOGGLE"
+        private const val ACTION_NEXT = "com.songrater.NEXT"
+        private const val CHANNEL_ID = "playback"
+        private const val NOTIFICATION_ID = 1
     }
 
     data class UiState(
@@ -79,12 +91,16 @@ class PlayerService : MediaSessionService() {
     private var loadedDest: String? = null
     private var loadToken = 0
     private var listToken = 0
+    private var isForeground = false
 
     // ---- lifecycle --------------------------------------------------------------------------
 
     override fun onCreate() {
         super.onCreate()
-        exo = ExoPlayer.Builder(this)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CHANNEL_ID, "Playback", NotificationManager.IMPORTANCE_LOW)
+        )
+        exo =ExoPlayer.Builder(this)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -135,9 +151,24 @@ class PlayerService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
+    // We post our own notification (see refreshNotification); stop Media3 from posting a second one.
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_TOGGLE -> togglePlay()
+            ACTION_NEXT -> skip()
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        if (!exo.playWhenReady) stopSelf()
+        if (!exo.playWhenReady) {
+            leaveForeground()
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {
@@ -175,8 +206,14 @@ class PlayerService : MediaSessionService() {
     fun rate(stars: Int) {
         val t = current ?: return
         if (stars !in 1..5) return
-        pendingStars = stars
-        Prefs.setPending(this, t.uri.toString(), stars)
+        if (stars == 1 && pendingStars == 1) {
+            // Tapping the 1-star again removes the rating: the song stays unrated and in rotation.
+            pendingStars = 0
+            if (Prefs.pendingUri(this) == t.uri.toString()) Prefs.clearPending(this)
+        } else {
+            pendingStars = stars
+            Prefs.setPending(this, t.uri.toString(), stars)
+        }
         publish()
     }
 
@@ -346,6 +383,7 @@ class PlayerService : MediaSessionService() {
             existingStars = 0
             exo.stop()
             exo.clearMediaItems()
+            leaveForeground()
             publish()
             return
         }
@@ -397,7 +435,69 @@ class PlayerService : MediaSessionService() {
     private fun displayTitle(t: Track, i: Id3Tag.Info?): String =
         i?.title?.takeIf { it.isNotBlank() } ?: t.name.removeSuffix(".mp3").removeSuffix(".MP3")
 
+    // ---- foreground service / notification ---------------------------------------------------
+    // We stay a foreground service for as long as there is a song loaded (playing or paused), so Android
+    // does not stop playback when the screen turns off. Media3's own notification is not used.
+
+    private fun refreshNotification() {
+        val t = current ?: return
+        val n = buildNotification(t)
+        if (!isForeground) {
+            try {
+                ServiceCompat.startForeground(
+                    this, NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+                isForeground = true
+            } catch (e: Exception) {
+                // Android refused (app not visible right now); try again on the next state change.
+            }
+        } else {
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, n)
+        }
+    }
+
+    private fun leaveForeground() {
+        if (isForeground) {
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            isForeground = false
+        }
+    }
+
+    private fun buildNotification(t: Track): Notification {
+        val playing = exo.playWhenReady
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        fun action(code: Int, name: String): PendingIntent = PendingIntent.getService(
+            this, code, Intent(this, PlayerService::class.java).setAction(name),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val artist = info?.artist.orEmpty()
+        val album = info?.album.orEmpty()
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_stat_star)
+            .setContentTitle(displayTitle(t, info))
+            .setContentText(listOf(artist, album).filter { it.isNotBlank() }.joinToString(" – "))
+            .setContentIntent(open)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .addAction(
+                if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (playing) "Pause" else "Play",
+                action(1, ACTION_TOGGLE)
+            )
+            .addAction(android.R.drawable.ic_media_next, "Next", action(2, ACTION_NEXT))
+        session?.let {
+            builder.setStyle(MediaStyleNotificationHelper.MediaStyle(it).setShowActionsInCompactView(0, 1))
+        }
+        return builder.build()
+    }
+
     private fun publish() {
+        refreshNotification()
         val l = listener ?: return
         val t = current
         l.onState(
